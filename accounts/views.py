@@ -1,4 +1,3 @@
-import requests as http_requests
 from django.conf import settings
 from django.contrib.auth import authenticate
 from rest_framework import status
@@ -211,76 +210,34 @@ class UserViewSet(ViewSet):
 
     @action(detail=False, methods=["post"], url_path="sync-from-ghl")
     def sync_from_ghl(self, request):
-        token = settings.GHL_PRIVATE_TOKEN
-        location_id = settings.GHL_LOCATION_ID
-        if not token:
+        from accounts.ghl_sync import get_ghl_sync_status, start_ghl_user_sync
+
+        if not settings.GHL_PRIVATE_TOKEN:
             return Response({"detail": "GHL_PRIVATE_TOKEN not configured"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        if not location_id:
+        if not settings.GHL_LOCATION_ID:
             return Response({"detail": "GHL_LOCATION_ID not configured"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        admin_ids = set(UserRole.objects.filter(role="admin").values_list("user_id", flat=True))
-
-        non_admin_qs = User.objects.exclude(id__in=admin_ids)
-        wiped = non_admin_qs.count()
-        non_admin_qs.delete()
-
-        preserved_emails = set(
-            User.objects.filter(id__in=admin_ids).values_list("email", flat=True)
-        )
-
-        resp = http_requests.get(
-            f"https://services.leadconnectorhq.com/users/?locationId={location_id}",
-            headers={"Authorization": f"Bearer {token}", "Version": "2021-07-28", "Accept": "application/json"},
-            timeout=30,
-        )
-        if not resp.ok:
+        if not start_ghl_user_sync():
+            status_payload = get_ghl_sync_status()
             return Response(
-                {"detail": f"GHL users list [{resp.status_code}]: {resp.text}"},
-                status=status.HTTP_502_BAD_GATEWAY,
+                {"detail": "GHL sync already in progress", **status_payload},
+                status=status.HTTP_409_CONFLICT,
             )
 
-        ghl_users = resp.json().get("users", [])
-        created = skipped = 0
-        failures = []
+        return Response({"status": "started", "running": True}, status=status.HTTP_202_ACCEPTED)
 
-        for u in ghl_users:
-            email = (u.get("email") or "").strip().lower()
-            if not email:
-                skipped += 1
-                continue
-            if email in preserved_emails:
-                skipped += 1
-                continue
-            full_name = (
-                u.get("name") or f"{u.get('firstName', '')} {u.get('lastName', '')}".strip() or email
-            )
-            phone = u.get("phone")
-            try:
-                new_user = User.objects.create_user(email=email, password=DEFAULT_GHL_PASSWORD)
-                new_user.set_full_name(full_name)
-                new_user.save()
-                new_user.roles.filter(role="admin").delete()
-                UserRole.objects.get_or_create(user=new_user, role="attendee")
-                if phone:
-                    profile, _ = Profile.objects.get_or_create(user=new_user)
-                    profile.phone = phone
-                    profile.save()
-                created += 1
-            except Exception as exc:
-                failures.append({"email": email, "error": str(exc)})
+    @action(detail=False, methods=["get"], url_path="sync-from-ghl/status")
+    def sync_from_ghl_status(self, request):
+        from accounts.ghl_sync import get_ghl_sync_status
 
-        if failures:
-            print("[admin] GHL sync failures:", failures)
-
-        return Response({
-            "ok": True,
-            "total": len(ghl_users),
-            "wiped": wiped,
-            "created": created,
-            "updated": 0,
-            "skipped": skipped,
-            "failed": len(failures),
-        })
+        payload = get_ghl_sync_status()
+        if payload["error"]:
+            return Response({"status": "failed", **payload}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        if payload["running"]:
+            return Response({"status": "running", **payload})
+        if payload["result"]:
+            return Response({"status": "completed", **payload})
+        return Response({"status": "idle", **payload})
 
     @action(detail=False, methods=["get"], url_path="staff", permission_classes=[IsAuthenticated])
     def staff(self, request):
