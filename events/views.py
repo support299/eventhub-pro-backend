@@ -26,6 +26,22 @@ def _is_admin(user):
     return user.roles.filter(role="admin").exists()
 
 
+def _event_ids(data):
+    return data.get("event_ids") or data.get("ids") or []
+
+
+def _user_can_access_event(user, event):
+    if _is_staff(user):
+        return True
+    if event.host_id == user.id:
+        return True
+    if EventHost.objects.filter(event=event, user=user).exists():
+        return True
+    if EventAttendee.objects.filter(event=event, user=user).exists():
+        return True
+    return False
+
+
 class EventViewSet(ViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -88,6 +104,9 @@ class EventViewSet(ViewSet):
         except Event.DoesNotExist:
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        if not _user_can_access_event(request.user, event):
+            return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
         occurrences = event.occurrences.all()
         occ_ids = occurrences.values_list("id", flat=True)
         attendees = event.attendees.all()
@@ -125,7 +144,7 @@ class EventViewSet(ViewSet):
                 EventOccurrence.objects.create(
                     event=event,
                     scheduled_at=occ_data["scheduled_at"],
-                    duration_minutes=data.get("duration_minutes") or event.duration_minutes,
+                    duration_minutes=occ_data.get("duration_minutes") or event.duration_minutes,
                 )
 
         return Response({"ok": True})
@@ -144,7 +163,7 @@ class EventViewSet(ViewSet):
     def bulk_delete(self, request):
         if not _is_admin(request.user):
             return Response({"detail": "Admin only"}, status=status.HTTP_403_FORBIDDEN)
-        ids = request.data.get("ids", [])
+        ids = _event_ids(request.data)
         Event.objects.filter(id__in=ids).delete()
         return Response({"ok": True})
 
@@ -152,7 +171,7 @@ class EventViewSet(ViewSet):
     def bulk_update_locations(self, request):
         if not _is_admin(request.user):
             return Response({"detail": "Admin only"}, status=status.HTTP_403_FORBIDDEN)
-        ids = request.data.get("ids", [])
+        ids = _event_ids(request.data)
         patch = {}
         if "physical_location" in request.data:
             patch["physical_location"] = request.data["physical_location"] or None

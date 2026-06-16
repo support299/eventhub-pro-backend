@@ -2,6 +2,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.permissions import IsStaff
+
 from .services import sync_event_participants, sync_user_schedule, upsert_ghl_contact
 
 
@@ -23,7 +25,7 @@ class UpsertContactView(APIView):
 
 
 class SyncUsersView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaff]
 
     def post(self, request):
         user_ids = request.data.get("user_ids", [])
@@ -41,7 +43,7 @@ class SyncUsersView(APIView):
 
 
 class SyncEventView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsStaff]
 
     def post(self, request):
         event_id = request.data.get("event_id")

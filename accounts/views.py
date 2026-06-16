@@ -9,7 +9,7 @@ from rest_framework.viewsets import ViewSet
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import User, Profile, UserRole
-from .permissions import IsAdmin
+from .permissions import IsAdmin, IsStaff
 from .serializers import MeSerializer, UserSerializer
 
 DEFAULT_GHL_PASSWORD = "EV3Nt5@1234"
@@ -30,14 +30,6 @@ class LoginView(APIView):
             "refresh": str(refresh),
             "user": MeSerializer(user).data,
         })
-
-
-class RefreshView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        from rest_framework_simplejwt.views import TokenRefreshView
-        return TokenRefreshView.as_view()(request._request)
 
 
 class LogoutView(APIView):
@@ -87,7 +79,7 @@ class UserViewSet(ViewSet):
         if self.action == "create":
             return [AllowAny()]
         if self.action in ("staff", "profiles"):
-            return [IsAuthenticated()]
+            return [IsStaff()]
         return [IsAdmin()]
 
     def list(self, request):
@@ -239,14 +231,14 @@ class UserViewSet(ViewSet):
             return Response({"status": "completed", **payload})
         return Response({"status": "idle", **payload})
 
-    @action(detail=False, methods=["get"], url_path="staff", permission_classes=[IsAuthenticated])
+    @action(detail=False, methods=["get"], url_path="staff", permission_classes=[IsStaff])
     def staff(self, request):
         from accounts.models import UserRole as UR
         staff_ids = UR.objects.filter(role__in=["admin", "trainer"]).values_list("user_id", flat=True)
         users = User.objects.filter(id__in=staff_ids).order_by("first_name", "last_name")
         return Response([{"id": str(u.id), "full_name": u.full_name, "email": u.email} for u in users])
 
-    @action(detail=False, methods=["get"], url_path="profiles", permission_classes=[IsAuthenticated])
+    @action(detail=False, methods=["get"], url_path="profiles", permission_classes=[IsStaff])
     def profiles(self, request):
         users = User.objects.order_by("first_name", "last_name")
         return Response([{"id": str(u.id), "full_name": u.full_name, "email": u.email} for u in users])

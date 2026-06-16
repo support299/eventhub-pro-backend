@@ -3,11 +3,25 @@ Server-side GoHighLevel integration service.
 All GHL API calls originate from here so the private token never leaves the backend.
 """
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from django.conf import settings
 
 GHL_BASE = "https://services.leadconnectorhq.com"
+
+
+def _format_time_ampm(dt: datetime) -> str:
+    hour = dt.hour % 12 or 12
+    period = "AM" if dt.hour < 12 else "PM"
+    return f"{hour}:{dt.minute:02d} {period}"
+
+
+def _to_local(dt: datetime, time_zone: str) -> datetime:
+    try:
+        return dt.astimezone(ZoneInfo(time_zone))
+    except Exception:
+        return dt
 
 
 def _ghl_headers():
@@ -137,14 +151,9 @@ def sync_user_schedule(user_id: str, tz: str | None = None, event_id: str | None
 
         d = occ["scheduled_at"]
         time_zone = (ev_detail["timezone"] if ev_detail else None) or tz or "UTC"
-        try:
-            import pytz
-            tz_obj = pytz.timezone(time_zone)
-            local_d = d.astimezone(tz_obj)
-        except Exception:
-            local_d = d
+        local_d = _to_local(d, time_zone)
         date_str = local_d.strftime("%d-%b-%Y")
-        time_str = local_d.strftime("%-I:%M %p") if hasattr(local_d, "strftime") else ""
+        time_str = _format_time_ampm(local_d)
 
         custom_fields += [
             {"key": "schedule_title", "field_value": ev_detail["title"] if ev_detail else ""},
