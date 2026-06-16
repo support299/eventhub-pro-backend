@@ -2,58 +2,80 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
 
 import requests
 from django.conf import settings
-from django.db import transaction
+from django.db import close_old_connections, transaction
+from django.utils import timezone
 
-from accounts.models import Profile, User, UserRole
+from accounts.models import GhlSyncState, Profile, User, UserRole
 
 DEFAULT_GHL_PASSWORD = "EV3Nt5@1234"
 GHL_USERS_URL = "https://services.leadconnectorhq.com/users/"
 
-
-@dataclass
-class _SyncJob:
-    running: bool = False
-    result: dict | None = None
-    error: str | None = None
-
-
-_job = _SyncJob()
 _lock = threading.Lock()
 
 
+def _get_state() -> GhlSyncState:
+    state, _ = GhlSyncState.objects.get_or_create(pk=1)
+    return state
+
+
 def get_ghl_sync_status() -> dict:
-    with _lock:
-        return {
-            "running": _job.running,
-            "result": _job.result,
-            "error": _job.error,
-        }
+    state = _get_state()
+    return {
+        "running": state.running,
+        "result": state.result,
+        "error": state.error or None,
+        "started_at": state.started_at.isoformat() if state.started_at else None,
+        "finished_at": state.finished_at.isoformat() if state.finished_at else None,
+    }
 
 
 def start_ghl_user_sync() -> bool:
     """Start sync in a background thread. Returns False if already running."""
     with _lock:
-        if _job.running:
-            return False
-        _job.running = True
-        _job.result = None
-        _job.error = None
+        state = _get_state()
+        if state.running:
+            stale = (
+                state.started_at
+                and (timezone.now() - state.started_at).total_seconds() > 30 * 60
+            )
+            if not stale:
+                return False
+            state.running = False
+            state.error = "Previous sync timed out"
+            state.finished_at = timezone.now()
+            state.save(update_fields=["running", "error", "finished_at", "updated_at"])
+        state.running = True
+        state.result = None
+        state.error = ""
+        state.started_at = timezone.now()
+        state.finished_at = None
+        state.save(
+            update_fields=["running", "result", "error", "started_at", "finished_at", "updated_at"]
+        )
 
     def worker():
+        close_old_connections()
         try:
             result = _perform_sync()
-            with _lock:
-                _job.result = result
+            state = _get_state()
+            state.result = result
+            state.error = ""
         except Exception as exc:
-            with _lock:
-                _job.error = str(exc)
+            state = _get_state()
+            state.error = str(exc)
+            state.result = None
+            print(f"[admin] GHL sync failed: {exc}")
         finally:
-            with _lock:
-                _job.running = False
+            state = _get_state()
+            state.running = False
+            state.finished_at = timezone.now()
+            state.save(
+                update_fields=["running", "result", "error", "finished_at", "updated_at"]
+            )
+            close_old_connections()
 
     threading.Thread(target=worker, daemon=True).start()
     return True
@@ -67,7 +89,7 @@ def _fetch_ghl_users(token: str, location_id: str) -> list[dict]:
             "Version": "2021-07-28",
             "Accept": "application/json",
         },
-        timeout=60,
+        timeout=120,
     )
     if not resp.ok:
         raise RuntimeError(f"GHL users list [{resp.status_code}]: {resp.text}")
@@ -111,37 +133,37 @@ def _perform_sync() -> dict:
     removed = created = updated = skipped = 0
     failures: list[dict] = []
 
-    with transaction.atomic():
-        for email, user in list(existing_users.items()):
-            if email not in ghl_by_email:
-                user.delete()
-                removed += 1
-                del existing_users[email]
+    for email, user in list(existing_users.items()):
+        if email not in ghl_by_email:
+            user.delete()
+            removed += 1
+            del existing_users[email]
 
-        for email, ghl_user in ghl_by_email.items():
-            if email in preserved_emails:
-                skipped += 1
-                continue
+    for email, ghl_user in ghl_by_email.items():
+        if email in preserved_emails:
+            skipped += 1
+            continue
 
-            _, full_name, phone = _ghl_user_fields(ghl_user)
+        _, full_name, phone = _ghl_user_fields(ghl_user)
 
-            if email in existing_users:
-                user = existing_users[email]
-                changed = False
-                if full_name:
-                    user.set_full_name(full_name)
-                    changed = True
-                if changed:
-                    user.save()
-                if phone is not None:
-                    profile, _ = Profile.objects.get_or_create(user=user)
-                    if profile.phone != phone:
-                        profile.phone = phone
-                        profile.save()
-                updated += 1
-                continue
+        if email in existing_users:
+            user = existing_users[email]
+            changed = False
+            if full_name:
+                user.set_full_name(full_name)
+                changed = True
+            if changed:
+                user.save()
+            if phone is not None:
+                profile, _ = Profile.objects.get_or_create(user=user)
+                if profile.phone != phone:
+                    profile.phone = phone
+                    profile.save()
+            updated += 1
+            continue
 
-            try:
+        try:
+            with transaction.atomic():
                 user = User.objects.create_user(email=email, password=DEFAULT_GHL_PASSWORD)
                 if full_name:
                     user.set_full_name(full_name)
@@ -152,9 +174,9 @@ def _perform_sync() -> dict:
                     profile, _ = Profile.objects.get_or_create(user=user)
                     profile.phone = phone
                     profile.save()
-                created += 1
-            except Exception as exc:
-                failures.append({"email": email, "error": str(exc)})
+            created += 1
+        except Exception as exc:
+            failures.append({"email": email, "error": str(exc)})
 
     if failures:
         print("[admin] GHL sync failures:", failures)

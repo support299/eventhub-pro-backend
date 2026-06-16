@@ -83,3 +83,21 @@ class UserRole(models.Model):
 
     def __str__(self):
         return f"{self.user.email} – {self.role}"
+
+
+class GhlSyncState(models.Model):
+    """Singleton row (pk=1) tracking background GHL user import — shared across Gunicorn workers."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    running = models.BooleanField(default=False)
+    result = models.JSONField(null=True, blank=True)
+    error = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "GHL sync state"
+
+    def __str__(self):
+        return "running" if self.running else "idle"
