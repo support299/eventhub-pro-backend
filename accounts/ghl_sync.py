@@ -96,13 +96,79 @@ def _fetch_ghl_users(token: str, location_id: str) -> list[dict]:
     return resp.json().get("users", [])
 
 
-def _ghl_user_fields(u: dict) -> tuple[str, str, str | None]:
+def ghl_user_fields(u: dict) -> tuple[str, str, str | None]:
     email = (u.get("email") or "").strip().lower()
     full_name = (
         u.get("name") or f"{u.get('firstName', '')} {u.get('lastName', '')}".strip() or email
     )
     phone = u.get("phone") or None
     return email, full_name, phone
+
+
+def _admin_emails() -> set[str]:
+    admin_ids = UserRole.objects.filter(role="admin").values_list("user_id", flat=True)
+    return set(User.objects.filter(id__in=admin_ids).values_list("email", flat=True))
+
+
+def ghl_user_belongs_to_location(u: dict, location_id: str) -> bool:
+    if not location_id:
+        return True
+    if u.get("locationId") == location_id:
+        return True
+    locations = u.get("locations") or []
+    return location_id in locations
+
+
+def upsert_user_from_ghl(u: dict) -> dict:
+    """Create or update a single GHL staff user in the local database."""
+    email, full_name, phone = ghl_user_fields(u)
+    if not email:
+        return {"action": "skipped", "reason": "missing_email"}
+
+    if email in _admin_emails():
+        return {"action": "skipped", "reason": "admin_preserved", "email": email}
+
+    try:
+        user = User.objects.select_related("profile").get(email=email)
+    except User.DoesNotExist:
+        with transaction.atomic():
+            user = User.objects.create_user(email=email, password=DEFAULT_GHL_PASSWORD)
+            if full_name:
+                user.set_full_name(full_name)
+                user.save()
+            user.roles.all().delete()
+            UserRole.objects.get_or_create(user=user, role="attendee")
+            if phone:
+                profile, _ = Profile.objects.get_or_create(user=user)
+                profile.phone = phone
+                profile.save()
+        return {"action": "created", "email": email}
+
+    changed = False
+    if full_name:
+        user.set_full_name(full_name)
+        changed = True
+    if changed:
+        user.save()
+    if phone is not None:
+        profile, _ = Profile.objects.get_or_create(user=user)
+        if profile.phone != phone:
+            profile.phone = phone
+            profile.save()
+    return {"action": "updated", "email": email}
+
+
+def delete_user_from_ghl(u: dict) -> dict:
+    """Remove a GHL staff user from the local database (admins are preserved)."""
+    email, _, _ = ghl_user_fields(u)
+    if not email:
+        return {"action": "skipped", "reason": "missing_email"}
+    if email in _admin_emails():
+        return {"action": "skipped", "reason": "admin_preserved", "email": email}
+    deleted, _ = User.objects.filter(email=email).delete()
+    if deleted:
+        return {"action": "deleted", "email": email}
+    return {"action": "skipped", "reason": "not_found", "email": email}
 
 
 def _perform_sync() -> dict:
@@ -113,10 +179,8 @@ def _perform_sync() -> dict:
     if not location_id:
         raise RuntimeError("GHL_LOCATION_ID not configured")
 
+    preserved_emails = _admin_emails()
     admin_ids = set(UserRole.objects.filter(role="admin").values_list("user_id", flat=True))
-    preserved_emails = set(
-        User.objects.filter(id__in=admin_ids).values_list("email", flat=True)
-    )
 
     ghl_users = _fetch_ghl_users(token, location_id)
     ghl_by_email: dict[str, dict] = {}
@@ -144,7 +208,7 @@ def _perform_sync() -> dict:
             skipped += 1
             continue
 
-        _, full_name, phone = _ghl_user_fields(ghl_user)
+        _, full_name, phone = ghl_user_fields(ghl_user)
 
         if email in existing_users:
             user = existing_users[email]

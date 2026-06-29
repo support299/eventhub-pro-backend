@@ -120,9 +120,11 @@ USE_TZ = True
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# GHL integration
+# GoHighLevel
 GHL_PRIVATE_TOKEN = os.environ.get("GHL_PRIVATE_TOKEN", "")
 GHL_LOCATION_ID = os.environ.get("GHL_LOCATION_ID", "")
+# Verify X-GHL-Signature / X-WH-Signature on incoming webhooks (default: True in production)
+GHL_WEBHOOK_VERIFY = os.environ.get("GHL_WEBHOOK_VERIFY", "False" if os.environ.get("DEBUG", "True") == "True" else "True") == "True"
 
 # Auto-login secret (for ?user=email feature)
 AUTO_LOGIN_SECRET = os.environ.get("AUTO_LOGIN_SECRET", "")

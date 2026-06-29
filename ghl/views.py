@@ -1,10 +1,14 @@
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from django.conf import settings
 
 from accounts.permissions import IsStaff
 
 from .services import sync_event_participants, sync_user_schedule, upsert_ghl_contact
+from .webhook_handlers import handle_ghl_user_webhook
+from .webhook_verify import verify_ghl_webhook
 
 
 class UpsertContactView(APIView):
@@ -54,4 +58,28 @@ class SyncEventView(APIView):
             result = sync_event_participants(event_id, tz)
             return Response({"ok": True, **result})
         except Exception as exc:
+            return Response({"ok": False, "error": str(exc)}, status=500)
+
+
+class GhlWebhookView(APIView):
+    """Receive GHL user lifecycle webhooks (UserCreate / UserUpdate / UserDelete)."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        raw_body = request.body
+        verify = getattr(settings, "GHL_WEBHOOK_VERIFY", not settings.DEBUG)
+        if verify:
+            ghl_sig = request.headers.get("X-GHL-Signature")
+            legacy_sig = request.headers.get("X-WH-Signature")
+            if not verify_ghl_webhook(raw_body, ghl_sig, legacy_sig):
+                return Response({"detail": "Invalid webhook signature"}, status=401)
+
+        try:
+            result = handle_ghl_user_webhook(request.data)
+            print(f"[GHL webhook] {result}")
+            return Response(result)
+        except Exception as exc:
+            print(f"[GHL webhook] failed: {exc}")
             return Response({"ok": False, "error": str(exc)}, status=500)
