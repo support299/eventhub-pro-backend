@@ -126,11 +126,49 @@ class Command(BaseCommand):
             action="store_true",
             help="Also import users.csv (not needed when users were created by GHL sync).",
         )
+        parser.add_argument(
+            "--reset-event-attendees",
+            action="store_true",
+            help="Delete all event_attendees before importing event_attendees.csv.",
+        )
+        parser.add_argument(
+            "--reset-attendance",
+            action="store_true",
+            help="Delete all attendance records before importing attendance.csv.",
+        )
+        parser.add_argument(
+            "--only",
+            nargs="+",
+            choices=[
+                "users",
+                "profiles",
+                "user_roles",
+                "events",
+                "event_occurrences",
+                "event_hosts",
+                "event_attendees",
+                "attendance",
+            ],
+            help="Import only the listed tables (default: all enabled importers).",
+        )
 
     def handle(self, *args, **options):
         data_dir = self._resolve_data_dir(options["data_dir"])
         import_users = options["import_users"]
+        only = set(options["only"] or [])
         self.stdout.write(self.style.NOTICE(f"Importing from {data_dir}"))
+
+        if options["reset_event_attendees"]:
+            deleted, _ = EventAttendee.objects.all().delete()
+            self.stdout.write(
+                self.style.WARNING(f"Reset event_attendees: deleted {deleted} row(s)")
+            )
+
+        if options["reset_attendance"]:
+            deleted, _ = Attendance.objects.all().delete()
+            self.stdout.write(
+                self.style.WARNING(f"Reset attendance: deleted {deleted} row(s)")
+            )
 
         self.supabase_id_to_email = self._load_supabase_user_map(data_dir)
         self.django_users_by_email = {
@@ -162,6 +200,8 @@ class Command(BaseCommand):
         ]
 
         for label, filename, importer, enabled in importers:
+            if only and label not in only:
+                continue
             path = data_dir / filename
             if not enabled:
                 self.stdout.write(
